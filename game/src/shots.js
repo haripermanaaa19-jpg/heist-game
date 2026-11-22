@@ -1,79 +1,87 @@
-// The screenshot scenes behind ?shot=start|play|end. Each one plays the real rules forward from a
-// fresh world for a fixed number of steps, steered by a simple autopilot (look ahead each way the
-// paddle could move, keep clear of blocks, chase the lowest coin when that is safe), so the frame
-// is what a short game really looks like and the same seed always gives the same frame.
-import { FIELD, PLAYER, STEP } from './config.js';
-import { EVENT_OVER, KIND_BLOCK } from './world.js';
-import { SCREEN_OVER, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
+// The screenshot scenes behind ?shot=start|play|alarm|end. Each one builds a real world and
+// plays its rules forward — idling so the patrols are mid-round, walking the thief onto loot,
+// standing him in a cone — so the frame is what the game itself looks like at that moment, and
+// the same scene always lands on the same frame. Nothing here draws; it only stages.
 
-const START_SECONDS = 5;
-const PLAY_SECONDS = 26;
-const END_LIMIT_SECONDS = 600;
-/**
- * How far ahead, in seconds, the autopilot checks each way it could move: the play scene's pilot
- * looks well ahead and keeps all its lives; the end scene's looks only a moment ahead, so it is
- * caught out once the blocks speed up, as a hurried player is.
- */
-const HORIZON_PLAY = 0.7;
-const HORIZON_END = 0.25;
-const SAMPLE = 1 / 30;
-const DIRECTIONS = [0, -1, 1];
-/** Extra room, each side, it keeps between the paddle and a block. */
-const MARGIN = 10;
+import { STEP, TILE, HUD_HEIGHT } from './config.js';
+import { createWorld } from './world.js';
+import { SCREEN_TITLE, SCREEN_PLAY, SCREEN_COMPLETE } from './render.js';
 
-/** Seconds until moving in `direction` (-1, 0, 1) runs the paddle into a block; Infinity when it never does. */
-function timeToHit(state, direction, horizon) {
-  const player = state.player;
-  for (let t = SAMPLE; t <= horizon; t += SAMPLE) {
-    const x = Math.min(FIELD.width - player.width, Math.max(0, player.x + direction * PLAYER.speed * t));
-    for (let index = 0; index < state.items.length; index += 1) {
-      const item = state.items[index];
-      if (!item.active || item.kind !== KIND_BLOCK) continue;
-      const y = item.y + item.speed * t;
-      if (y + item.height > player.y && y < player.y + player.height && item.x < x + player.width + MARGIN && item.x + item.width > x - MARGIN) return t;
-    }
-  }
-  return Infinity;
+function tileCenter(tx, ty) {
+  return { x: tx * TILE + TILE / 2, y: HUD_HEIGHT + ty * TILE + TILE / 2 };
 }
 
-/** Of the safe ways to move, the one toward the lowest coin (or the centre); else the one that is hit last. */
-function autopilot(state, horizon) {
-  const player = state.player;
-  let coin = null;
-  for (let index = 0; index < state.items.length; index += 1) {
-    const item = state.items[index];
-    if (item.active && item.kind !== KIND_BLOCK && (coin === null || item.y > coin.y)) coin = item;
-  }
-  const target = coin === null ? FIELD.width / 2 : coin.x + coin.width / 2;
-  const centre = player.x + player.width / 2;
-  const wanted = target > centre + 8 ? 1 : target < centre - 8 ? -1 : 0;
-  let best = wanted;
-  let bestTime = timeToHit(state, wanted, horizon);
-  for (let index = 0; index < DIRECTIONS.length && bestTime !== Infinity; index += 1) {
-    const time = timeToHit(state, DIRECTIONS[index], horizon);
-    if (time > bestTime) {
-      bestTime = time;
-      best = DIRECTIONS[index];
-    }
-  }
-  return best;
+function idle(world, seconds) {
+  for (let i = 0; i < seconds / STEP; i += 1) world.step(STEP, { x: 0, y: 0, sneak: false });
+}
+
+function walk(world, seconds, input) {
+  for (let i = 0; i < seconds / STEP; i += 1) world.step(STEP, input);
+}
+
+/** The cover: the title over the first floor, its patrol already on the move. */
+function stageStart(world) {
+  idle(world, 3.5);
+  return SCREEN_TITLE;
+}
+
+/** Mid-heist on floor one: the thief crosses the hall with the meter already warm. */
+function stagePlay(world) {
+  idle(world, 2);
+  const spot = tileCenter(11, 7);
+  world.state.player.x = spot.x;
+  world.state.player.y = spot.y;
+  world.state.player.angle = 0;
+  world.state.alarm = 34;
+  walk(world, 0.45, { x: 1, y: 0, sneak: false });
+  return SCREEN_PLAY;
+}
+
+/** The moment it goes wrong: caught in a guard's cone, the meter nearly full. */
+function stageAlarm(world) {
+  idle(world, 2.6);
+  const guard = world.state.guards[0];
+  const post = tileCenter(10, 7);
+  guard.x = post.x;
+  guard.y = post.y;
+  guard.wait = 30;
+  guard.scanBase = 0;
+  guard.angle = 0;
+  world.state.player.x = post.x + 72;
+  world.state.player.y = post.y;
+  world.state.player.angle = Math.PI;
+  world.state.alarm = 88;
+  idle(world, 0.3);
+  return SCREEN_PLAY;
+}
+
+/** The getaway: gem lifted, a bag grabbed on the way, and the van reached. */
+function stageEnd(world) {
+  idle(world, 9);
+  const state = world.state;
+  const gem = state.loots.find((loot) => loot.kind === 'gem');
+  state.player.x = gem.x;
+  state.player.y = gem.y;
+  world.step(STEP, { x: 0, y: 0, sneak: false });
+  const cash = state.loots.find((loot) => loot.kind === 'cash' && loot.x > 400 && loot.y > 400);
+  state.player.x = cash.x;
+  state.player.y = cash.y;
+  world.step(STEP, { x: 0, y: 0, sneak: false });
+  const doorstep = tileCenter(18, 12);
+  state.player.x = doorstep.x;
+  state.player.y = doorstep.y;
+  walk(world, 0.6, { x: 1, y: 0, sneak: false });
+  return SCREEN_COMPLETE;
 }
 
 /**
- * Set `world` to the named scene (start, play or end; any other name is start) and return the
- * screen to draw over it and the best score to show.
+ * Set a fresh world to the named scene (start, play, alarm or end; any other name is start)
+ * and return the screen to draw over it.
  */
 export function stageShot(name, world) {
-  world.reset();
-  if (name !== 'play' && name !== 'end') {
-    for (let index = 0; index < START_SECONDS / STEP; index += 1) world.step(STEP, 0, true);
-    return { screen: SCREEN_TITLE, best: 0 };
-  }
-  const limit = name === 'end' ? END_LIMIT_SECONDS : PLAY_SECONDS;
-  const horizon = name === 'end' ? HORIZON_END : HORIZON_PLAY;
-  for (let index = 0; index < limit / STEP; index += 1) {
-    if (world.step(STEP, autopilot(world.state, horizon), false) & EVENT_OVER) break;
-  }
-  const over = world.state.lives === 0;
-  return { screen: over ? SCREEN_OVER : SCREEN_PLAY, best: world.state.score };
+  world.loadLevel(0, false);
+  if (name === 'play') return stagePlay(world);
+  if (name === 'alarm') return stageAlarm(world);
+  if (name === 'end' || name === 'escape') return stageEnd(world);
+  return stageStart(world);
 }
